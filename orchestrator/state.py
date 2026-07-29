@@ -34,6 +34,7 @@ class CodeDiff(TypedDict):
     diff: str
     summary: str
     applied: bool
+    before: str
 
 
 class TestResult(TypedDict):

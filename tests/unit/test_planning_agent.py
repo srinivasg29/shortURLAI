@@ -93,6 +93,52 @@ def test_run_falls_back_when_live_call_returns_invalid_graph(monkeypatch):
     assert "design" in task_ids
 
 
+def test_default_task_graph_without_replan_reason_has_no_remediate_task():
+    graph = planning.default_task_graph("spec")
+    ids = {t["id"] for t in graph["tasks"]}
+    assert "remediate" not in ids
+
+
+def test_default_task_graph_with_replan_reason_inserts_remediate_task():
+    graph = planning.default_task_graph("spec", replan_reason="gate_3 failed: ruff error")
+    valid, detail = planning.validate_task_graph(graph)
+    assert valid, detail
+
+    by_id = {t["id"]: t for t in graph["tasks"]}
+    assert "remediate" in by_id
+    assert "ruff error" in by_id["remediate"]["description"]
+    assert by_id["design"]["depends_on"] == ["remediate"]
+
+
+def test_run_reads_replan_reason_from_last_replan_log_entry(monkeypatch):
+    monkeypatch.setattr(planning, "is_live", lambda: False)
+
+    state = {
+        "normalized_spec": "spec",
+        "replan_log": [
+            {
+                "trigger_reason": "gate_2 failed: rejected",
+                "node_re_entered": "planning",
+                "count": 1,
+                "timestamp": "t",
+            }
+        ],
+    }
+    result = planning.run(state)
+
+    by_id = {t["id"]: t for t in result["task_graph"]["tasks"]}
+    assert "gate_2 failed: rejected" in by_id["remediate"]["description"]
+
+
+def test_run_without_replan_log_has_no_remediate_task(monkeypatch):
+    monkeypatch.setattr(planning, "is_live", lambda: False)
+
+    result = planning.run({"normalized_spec": "spec"})
+
+    ids = {t["id"] for t in result["task_graph"]["tasks"]}
+    assert "remediate" not in ids
+
+
 def test_run_omits_llm_mode_when_live_call_succeeds(monkeypatch):
     monkeypatch.setattr(planning, "is_live", lambda: True)
     monkeypatch.setattr(
