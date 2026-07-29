@@ -1,6 +1,7 @@
 import pytest
 
 from app.services.shortener import (
+    AliasAlreadyTaken,
     CodeGenerationExhausted,
     InvalidTargetUrl,
     create_short_url,
@@ -66,3 +67,49 @@ def test_create_short_url_skips_reserved_codes(db_session, monkeypatch):
 
     short_url = create_short_url(db_session, "https://example.com/reserved-test")
     assert short_url.code == "goodcode"
+
+
+def test_create_short_url_uses_custom_alias(db_session):
+    short_url = create_short_url(
+        db_session, "https://example.com/vanity", custom_alias="my-cool-link"
+    )
+    assert short_url.code == "my-cool-link"
+
+
+def test_create_short_url_rejects_taken_custom_alias(db_session):
+    create_short_url(db_session, "https://example.com/first", custom_alias="taken")
+
+    with pytest.raises(AliasAlreadyTaken):
+        create_short_url(db_session, "https://example.com/second", custom_alias="taken")
+
+
+def test_create_short_url_rejects_reserved_custom_alias(db_session):
+    with pytest.raises(AliasAlreadyTaken):
+        create_short_url(db_session, "https://example.com/x", custom_alias="health")
+
+
+def test_create_short_url_custom_alias_takes_priority_over_generation(db_session, monkeypatch):
+    import app.services.shortener as shortener_module
+
+    def _fail_if_called(length):
+        raise AssertionError("generate_code should not be called when custom_alias is given")
+
+    monkeypatch.setattr(shortener_module, "generate_code", _fail_if_called)
+
+    short_url = create_short_url(db_session, "https://example.com/y", custom_alias="explicit")
+    assert short_url.code == "explicit"
+
+
+def test_create_short_url_raises_alias_taken_on_concurrent_insert_race(db_session, monkeypatch):
+    """The pre-commit uniqueness check is optimistic; a concurrent request
+    can still win the race between the check and the commit. Simulate that
+    by making the check pass (nothing in the table yet) but the actual
+    insert collide, and confirm it surfaces as AliasAlreadyTaken, not a
+    raw IntegrityError."""
+    import app.services.shortener as shortener_module
+
+    monkeypatch.setattr(shortener_module, "_resolve_custom_alias", lambda db, alias: alias)
+    create_short_url(db_session, "https://example.com/first", custom_alias="race")
+
+    with pytest.raises(AliasAlreadyTaken):
+        create_short_url(db_session, "https://example.com/second", custom_alias="race")

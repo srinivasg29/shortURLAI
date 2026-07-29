@@ -62,11 +62,56 @@ def test_expired_redirect_returns_410(client, monkeypatch):
     assert redirect_resp.status_code == 410
 
 
+def test_shorten_with_custom_alias(client):
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/vanity", "custom_alias": "my-link"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["code"] == "my-link"
+
+    redirect_resp = client.get("/my-link", follow_redirects=False)
+    assert redirect_resp.status_code == 302
+    assert redirect_resp.headers["location"] == "https://example.com/vanity"
+
+
+def test_shorten_rejects_taken_custom_alias(client):
+    client.post(
+        "/api/shorten", json={"target_url": "https://example.com/a", "custom_alias": "dup"}
+    )
+    resp = client.post(
+        "/api/shorten", json={"target_url": "https://example.com/b", "custom_alias": "dup"}
+    )
+    assert resp.status_code == 409
+
+
+def test_shorten_rejects_reserved_custom_alias(client):
+    resp = client.post(
+        "/api/shorten", json={"target_url": "https://example.com/x", "custom_alias": "health"}
+    )
+    assert resp.status_code == 409
+
+
+def test_shorten_rejects_malformed_custom_alias(client):
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/x", "custom_alias": "has a space"},
+    )
+    assert resp.status_code == 422
+
+
+def test_shorten_rejects_too_short_custom_alias(client):
+    resp = client.post(
+        "/api/shorten", json={"target_url": "https://example.com/x", "custom_alias": "ab"}
+    )
+    assert resp.status_code == 422
+
+
 def test_shorten_returns_503_when_codes_exhausted(client, monkeypatch):
     import app.routers.shorten as shorten_module
     from app.services.shortener import CodeGenerationExhausted
 
-    def _always_exhausted(db, target_url, expires_in_days=None):
+    def _always_exhausted(db, target_url, expires_in_days=None, custom_alias=None):
         raise CodeGenerationExhausted("no codes left")
 
     monkeypatch.setattr(shorten_module, "create_short_url", _always_exhausted)
