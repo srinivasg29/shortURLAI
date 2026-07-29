@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite3
+.env
+audit_log.jsonl
