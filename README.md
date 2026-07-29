@@ -57,4 +57,26 @@ the validation/expiration/error paths.
 
 ## Running the Agentic Orchestrator
 
-_Filled in during Phase 5+._
+The orchestrator is a [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph` over a
+single typed `OrchestratorState` (`orchestrator/state.py`) threaded through every node; list-valued
+fields (`gate_log`, `architecture_decisions`, etc.) use an `operator.add` reducer so nodes append
+to the decision lineage instead of overwriting it. So far the graph has one node:
+
+- **Requirement Agent** (`orchestrator/agents/requirement.py`) — interprets a raw requirement,
+  flags ambiguity, and normalizes it into an engineering-ready spec. Evaluates **Gate 0**
+  (intake normalized, ambiguity flagged) automatically.
+
+```python
+from orchestrator.graph import run_requirement_intake
+
+state = run_requirement_intake("make the service more secure", scenario="ambiguous")
+```
+
+Every gate decision is appended to both `state["gate_log"]` (in-memory decision lineage) and the
+durable audit log at `AUDIT_LOG_PATH` (default `./audit_log.jsonl`, one JSON object per line).
+
+When `ANTHROPIC_API_KEY` is unset, agents fall back to deterministic heuristics instead of calling
+the model — `state["llm_mode"]` records which path ran (`"live"` or `"mock"`) for every run, so
+mock-mode runs are visible in the audit trail rather than silently masquerading as real ones.
+Planning, Architecture, Coding, Testing, Documentation, Review, and Release Readiness agents land
+in later phases and extend this same graph.

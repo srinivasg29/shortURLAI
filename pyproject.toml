@@ -45,4 +45,7 @@ target-version = "py311"
 [tool.ruff.lint]
 # B008: FastAPI's `Depends(...)` in argument defaults is the documented,
 # intended pattern, not the mutable-default-argument bug this rule targets.
-ignore = ["B008"]
+# S110/BLE001: orchestrator agents deliberately catch-and-fall-back on any
+# LLM failure mode (the plan's Section 3.4 Fallback control) rather than
+# enumerate every possible SDK/network/parsing exception.
+ignore = ["B008", "S110", "BLE001"]
