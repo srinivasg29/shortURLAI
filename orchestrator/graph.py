@@ -10,7 +10,15 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 
 from orchestrator import audit
-from orchestrator.agents import architecture, coding, planning, requirement
+from orchestrator.agents import (
+    architecture,
+    coding,
+    documentation,
+    planning,
+    requirement,
+    sync,
+    testing,
+)
 from orchestrator.state import OrchestratorState
 
 
@@ -44,6 +52,27 @@ def _coding_node(state: OrchestratorState) -> OrchestratorState:
     return result
 
 
+def _testing_node(state: OrchestratorState) -> OrchestratorState:
+    result = testing.run(state)
+    for tr in result.get("test_results", []):
+        audit.append_event({"type": "test_result", **tr})
+    return result
+
+
+def _documentation_node(state: OrchestratorState) -> OrchestratorState:
+    result = documentation.run(state)
+    for diff in result.get("doc_diffs", []):
+        audit.append_event({"type": "doc_diff", **diff})
+    return result
+
+
+def _gate4_sync_node(state: OrchestratorState) -> OrchestratorState:
+    result = sync.run_gate4(state)
+    for entry in result.get("gate_log", []):
+        audit.append_event({"type": "gate", **entry})
+    return result
+
+
 @lru_cache
 def build_graph():
     """Compiled once and cached: the checkpointer backing Gate 2's
@@ -54,11 +83,25 @@ def build_graph():
     graph.add_node("planning", _planning_node)
     graph.add_node("architecture", _architecture_node)
     graph.add_node("coding", _coding_node)
+    graph.add_node("testing", _testing_node)
+    graph.add_node("documentation", _documentation_node)
+    graph.add_node("gate4_sync", _gate4_sync_node)
+
     graph.set_entry_point("requirement")
     graph.add_edge("requirement", "planning")
     graph.add_edge("planning", "architecture")
     graph.add_edge("architecture", "coding")
-    graph.add_edge("coding", END)
+
+    # Fan-out: Testing and Documentation both run off Coding's output.
+    graph.add_edge("coding", "testing")
+    graph.add_edge("coding", "documentation")
+    # Fan-in: gate4_sync only runs once both branches have completed: this
+    # is what makes Gate 4 a real synchronization point, not two independent
+    # checks that happen to share a name.
+    graph.add_edge("testing", "gate4_sync")
+    graph.add_edge("documentation", "gate4_sync")
+    graph.add_edge("gate4_sync", END)
+
     return graph.compile(checkpointer=InMemorySaver())
 
 

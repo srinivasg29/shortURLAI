@@ -60,7 +60,7 @@ the validation/expiration/error paths.
 The orchestrator is a [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph` over a
 single typed `OrchestratorState` (`orchestrator/state.py`) threaded through every node; list-valued
 fields (`gate_log`, `architecture_decisions`, etc.) use an `operator.add` reducer so nodes append
-to the decision lineage instead of overwriting it. So far the graph runs four nodes in sequence:
+to the decision lineage instead of overwriting it. So far the graph runs:
 
 - **Requirement Agent** (`orchestrator/agents/requirement.py`) — interprets a raw requirement,
   flags ambiguity, and normalizes it into an engineering-ready spec. Evaluates **Gate 0**
@@ -90,6 +90,35 @@ to the decision lineage instead of overwriting it. So far the graph runs four no
     `code_diffs` entry with `applied: False` and an empty diff — a labeled proposal, not a
     filesystem change. **The repository is never mutated in mock mode**, which is what every
     automated test in this repo runs under.
+
+### The first parallel branch: Testing + Documentation, synced at Gate 4
+
+Coding fans out to two nodes that run off the same output — this is the graph's first genuine
+parallel branch, not just a longer sequential chain:
+
+```
+coding --> testing ------\
+       \-> documentation -+--> gate4_sync --> ...
+```
+
+- **Testing Agent** (`orchestrator/agents/testing.py`) — if Coding actually applied a change,
+  live mode asks the model for a pytest module exercising it, validates the module parses, writes
+  it to `tests/unit/test_<module>_generated.py`, and **actually runs it** with a real `pytest`
+  subprocess — a genuine pass/fail signal, not a simulated one. If Coding produced only a
+  proposal (mock mode, or no target identified), Testing has nothing concrete to exercise and
+  records a `proposal_only` result that trivially passes (`executed: False`), the same "nothing
+  to check" convention Gate 3 uses.
+- **Documentation Agent** (`orchestrator/agents/documentation.py`) — same conservatism: only
+  appends a changelog entry to `docs/CHANGELOG.md` when a code change was actually applied. Live
+  mode asks the model for the entry text; mock mode (or a failed live call) falls back to a fixed
+  template — the plan's own example of the Fallback control ("template-based doc generation if
+  the Documentation Agent fails").
+- **`gate4_sync`** (`orchestrator/agents/sync.py`) — runs once *both* branches have completed
+  (LangGraph only executes a node once every incoming edge has fired, which is what makes this a
+  real synchronization point rather than two independent checks under a shared name), and
+  evaluates **Gate 4** (`tests pass AND docs complete`) by reading both `state["test_results"]`
+  and `state["doc_diffs"]` — proof, via a single gate_log entry, that both parallel branches
+  actually wrote into the same shared state rather than one clobbering the other.
 
 ### Human approval gates (Gate 2, 5, 6)
 
@@ -124,5 +153,4 @@ the model — `state["llm_mode"]` records which path ran (`"live"` or `"mock"`) 
 mock-mode runs are visible in the audit trail rather than silently masquerading as real ones. A
 node only ever downgrades this flag to `"mock"`, never upgrades it, so the flag reflects the
 worst case across the whole run.
-Testing, Documentation, Review, and Release Readiness agents land in later phases and extend
-this same graph.
+Review and Release Readiness agents land in later phases and extend this same graph.

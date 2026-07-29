@@ -40,12 +40,14 @@ class TestResult(TypedDict):
     name: str
     passed: bool
     detail: str
+    executed: bool
 
 
 class DocDiff(TypedDict):
     path: str
     diff: str
     summary: str
+    applied: bool
 
 
 class OrchestratorState(TypedDict, total=False):
