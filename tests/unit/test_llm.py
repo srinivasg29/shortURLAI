@@ -112,9 +112,60 @@ def test_call_llm_logs_a_retry_audit_event_per_failed_attempt(monkeypatch, tmp_p
     get_settings.cache_clear()
     _install_flaky_client(monkeypatch, fail_count=llm.MAX_RETRIES)
 
-    llm.call_llm("system", "prompt")
+    llm.call_llm("system", "prompt", node="planning_agent")
 
     events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     retry_events = [e for e in events if e["type"] == "llm_retry"]
     assert len(retry_events) == llm.MAX_RETRIES
     assert [e["attempt"] for e in retry_events] == list(range(1, llm.MAX_RETRIES + 1))
+    assert all(e["node"] == "planning_agent" for e in retry_events)
+
+
+def test_call_llm_logs_a_successful_llm_call_event_with_tokens(monkeypatch, tmp_path):
+    import json
+
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(audit_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+    get_settings.cache_clear()
+
+    text_block = types.SimpleNamespace(type="text", text="ok")
+    usage = types.SimpleNamespace(input_tokens=12, output_tokens=34)
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(content=[text_block], usage=usage)
+
+    class _FakeAnthropic:
+        def __init__(self, api_key):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=_FakeAnthropic))
+
+    llm.call_llm("system", "prompt", node="coding_agent")
+
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    [event] = [e for e in events if e["type"] == "llm_call"]
+    assert event["node"] == "coding_agent"
+    assert event["success"] is True
+    assert event["input_tokens"] == 12
+    assert event["output_tokens"] == 34
+    assert event["latency_ms"] >= 0
+
+
+def test_call_llm_logs_a_failed_llm_call_event_after_exhausting_retries(monkeypatch, tmp_path):
+    import json
+
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(audit_path))
+    get_settings.cache_clear()
+    _install_flaky_client(monkeypatch, fail_count=llm.MAX_RETRIES + 1)
+
+    with pytest.raises(TimeoutError):
+        llm.call_llm("system", "prompt", node="testing_agent")
+
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    [event] = [e for e in events if e["type"] == "llm_call"]
+    assert event["success"] is False
+    assert event["node"] == "testing_agent"
+    assert event["input_tokens"] is None

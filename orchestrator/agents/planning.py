@@ -142,7 +142,7 @@ def _plan(normalized_spec: str, replan_reason: str | None) -> tuple[dict[str, An
                     f"breakdown to address it (e.g. add a remediation task) rather than "
                     f"repeating the same plan verbatim."
                 )
-            raw = call_llm(SYSTEM_PROMPT, prompt)
+            raw = call_llm(SYSTEM_PROMPT, prompt, node="planning_agent")
             parsed = _extract_json(raw)
             valid, _ = validate_task_graph(parsed)
             if valid:

@@ -58,7 +58,7 @@ def default_proposals(normalized_spec: str) -> list[dict[str, str]]:
 def _propose(normalized_spec: str) -> tuple[list[dict[str, str]], str]:
     if is_live():
         try:
-            raw = call_llm(SYSTEM_PROMPT, normalized_spec)
+            raw = call_llm(SYSTEM_PROMPT, normalized_spec, node="architecture_agent")
             parsed = _extract_json(raw)
             decisions = parsed.get("decisions")
             if decisions:

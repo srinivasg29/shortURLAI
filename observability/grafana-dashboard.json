@@ -1,0 +1,134 @@
+{
+  "title": "Agentic URL Shortener — Orchestrator Reliability",
+  "uid": "agentic-url-shortener-orchestrator",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "utc",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["agentic-sdlc", "orchestrator"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Run success rate",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "thresholds": {
+          "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 0.7 },
+            { "color": "green", "value": 0.95 }
+          ]
+        } },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "orchestrator_success_rate", "refId": "A" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Total runs",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "orchestrator_run_count", "refId": "A" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Safe-stops / Rollbacks",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "orchestrator_safe_stop_count", "legendFormat": "safe-stops", "refId": "A" },
+        { "expr": "orchestrator_rollback_count", "legendFormat": "rollbacks", "refId": "B" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Mean time to resolution (safe-stop → resumed)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "orchestrator_mean_time_to_resolution_seconds", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "End-to-end run latency: automated vs. human-approval wait",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "orchestrator_avg_automated_seconds", "legendFormat": "automated", "refId": "A" },
+        { "expr": "orchestrator_avg_human_wait_seconds", "legendFormat": "human wait", "refId": "B" },
+        { "expr": "orchestrator_avg_end_to_end_seconds", "legendFormat": "total", "refId": "C" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "LLM retry frequency by node",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "orchestrator_llm_retry_count", "legendFormat": "{{node}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Average LLM call latency by node (ms)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "targets": [
+        { "expr": "orchestrator_llm_latency_ms_avg", "legendFormat": "{{node}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Successful LLM calls by node",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "orchestrator_llm_call_count", "legendFormat": "{{node}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "URL shortener HTTP request rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "From prometheus-fastapi-instrumentator (app/main.py), not the orchestrator - the service's own request throughput/latency.",
+      "targets": [
+        {
+          "expr": "sum by (handler, method) (rate(http_requests_total[5m]))",
+          "legendFormat": "{{method}} {{handler}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      }
+    ]
+  }
+}

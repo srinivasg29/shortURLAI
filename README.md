@@ -36,7 +36,10 @@ uvicorn app.main:app --reload
 - `GET /{code}` — 302 redirect to the target URL; records a click asynchronously.
 - `GET /api/urls/{code}/stats` — click count and metadata for a short code.
 - `GET /health` — liveness check.
-- `GET /metrics` — Prometheus metrics.
+- `GET /metrics` — Prometheus metrics for the HTTP service itself.
+- `GET /orchestrator/metrics` — Prometheus metrics for the orchestrator (success rate, retry/
+  rollback frequency, MTTR, latency breakdown — see [Observability](#observability)).
+- `GET /orchestrator/runs/{run_id}` — one run's full audit timeline as JSON.
 - `GET /docs` — interactive OpenAPI docs (`/openapi.json` for the raw schema).
 
 By default the service uses a local SQLite file (`data/shortener.db`) and an in-process TTL
@@ -238,3 +241,26 @@ Testing is a parallel branch feeding into `gate4_sync`'s fan-in — conditionall
 from a fan-in predecessor risks gate4_sync waiting on an edge that never fires. Checking Gate 4
 after the sync point achieves the same effect safely: in this design, `gate4_sync` can only fail
 because Testing failed (Documentation always trivially "completes"), so it's a faithful stand-in.
+
+## Observability
+
+- **Audit log** (`orchestrator/audit.py`) — every gate decision, code/test/doc diff, re-plan,
+  safe-stop, and LLM call/retry is appended as one JSON line to `AUDIT_LOG_PATH`
+  (`./audit_log.jsonl` by default), each auto-stamped with a timestamp if the caller didn't
+  already set one. This is the single source of truth everything else in this section reads from
+  — nothing here is tracked separately in-process, so it can't drift from what actually happened.
+- **Prometheus** — `GET /metrics` (HTTP-level service metrics) and `GET /orchestrator/metrics`
+  (Section 8's reliability metrics: success rate, retry/rollback frequency by node, MTTR,
+  end-to-end latency split into automated vs. human-approval wait time — computed fresh from the
+  audit log by `orchestrator/metrics.py` on every scrape).
+- **Grafana** — `observability/grafana-dashboard.json` is a real, importable dashboard covering
+  every metric above; `observability/prometheus.yml` is a matching scrape config. See
+  [`observability/README.md`](observability/README.md) for how to wire them up locally.
+- **Tracing** — `app/tracing.py` configures OpenTelemetry with a `ConsoleSpanExporter`; every
+  orchestrator node execution and every FastAPI request emits a span, with each run's nodes
+  nesting under one parent `run`/`run_resume` span (`run_id`, and `gate_id`/`gate_passed` when
+  applicable, as attributes) — a full trace tree per run, inspectable from stdout with no
+  external collector needed for local development.
+- **Run timeline** — `GET /orchestrator/runs/{run_id}` reconstructs one run's full decision
+  lineage from the audit log as JSON, independent of whether that run's in-memory
+  `OrchestratorState` still exists.
