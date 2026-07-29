@@ -12,9 +12,7 @@ router = APIRouter(tags=["redirect"])
 def _record_click_by_code(code: str) -> None:
     db = SessionLocal()
     try:
-        short_url = get_by_code(db, code)
-        if short_url is not None:
-            record_click(db, short_url)
+        record_click(db, code)
     finally:
         db.close()
 
