@@ -15,7 +15,9 @@ from orchestrator.agents import (
     coding,
     documentation,
     planning,
+    release,
     requirement,
+    review,
     sync,
     testing,
 )
@@ -73,11 +75,25 @@ def _gate4_sync_node(state: OrchestratorState) -> OrchestratorState:
     return result
 
 
+def _review_node(state: OrchestratorState) -> OrchestratorState:
+    result = review.run(state)
+    for entry in result.get("gate_log", []):
+        audit.append_event({"type": "gate", **entry})
+    return result
+
+
+def _release_node(state: OrchestratorState) -> OrchestratorState:
+    result = release.run(state)
+    for entry in result.get("gate_log", []):
+        audit.append_event({"type": "gate", **entry})
+    return result
+
+
 @lru_cache
 def build_graph():
-    """Compiled once and cached: the checkpointer backing Gate 2's
-    interrupt/resume must be the same instance across a run's start and
-    resume calls, since it's what holds the paused state in memory."""
+    """Compiled once and cached: the checkpointer backing the human-approval
+    gates' interrupt/resume must be the same instance across a run's start
+    and resume calls, since it's what holds the paused state in memory."""
     graph = StateGraph(OrchestratorState)
     graph.add_node("requirement", _requirement_node)
     graph.add_node("planning", _planning_node)
@@ -86,6 +102,8 @@ def build_graph():
     graph.add_node("testing", _testing_node)
     graph.add_node("documentation", _documentation_node)
     graph.add_node("gate4_sync", _gate4_sync_node)
+    graph.add_node("review", _review_node)
+    graph.add_node("release", _release_node)
 
     graph.set_entry_point("requirement")
     graph.add_edge("requirement", "planning")
@@ -100,7 +118,10 @@ def build_graph():
     # checks that happen to share a name.
     graph.add_edge("testing", "gate4_sync")
     graph.add_edge("documentation", "gate4_sync")
-    graph.add_edge("gate4_sync", END)
+
+    graph.add_edge("gate4_sync", "review")
+    graph.add_edge("review", "release")
+    graph.add_edge("release", END)
 
     return graph.compile(checkpointer=InMemorySaver())
 

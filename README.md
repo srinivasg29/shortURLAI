@@ -120,29 +120,52 @@ coding --> testing ------\
   and `state["doc_diffs"]` — proof, via a single gate_log entry, that both parallel branches
   actually wrote into the same shared state rather than one clobbering the other.
 
+### Review and Release Readiness: Gate 5 and Gate 6
+
+```
+gate4_sync --> review --> release --> END
+```
+
+- **Review Agent** (`orchestrator/agents/review.py`) — synthesizes a quality summary from the
+  run so far (was code applied, did tests pass, are docs complete, which gates failed) and gates
+  on it at **Gate 5** (`HUMAN APPROVAL: quality sign-off`).
+- **Release Readiness Agent** (`orchestrator/agents/release.py`) — runs an automated readiness
+  checklist (every prior gate in `gate_log` passed?) and gates on it at **Gate 6**
+  (`HUMAN APPROVAL: release`), the final production-impacting action. On approval,
+  `state["released"]` is set.
+
+Both agents' `AUTO_APPROVE=1` path is deliberately conditional, not a rubber stamp: Gate 5
+auto-approves only if Gates 3 and 4 both passed; Gate 6 auto-approves only if *every* gate
+in the log passed. A CI run with a failing test doesn't sail through these gates just because
+no human was watching — it fails closed, the same way a careful reviewer would. A human resuming
+an interactive run can still override and approve anyway (their call, not the system's to make
+silently) — see `test_release_readiness_blocks_when_reviewer_rejects` for that path.
+
 ### Human approval gates (Gate 2, 5, 6)
 
 These pause the graph rather than auto-passing. The mechanism is LangGraph's native
 `interrupt()`/`Command(resume=...)`, backed by an in-memory checkpointer keyed on `run_id` — no
 blocking `input()` calls inside library code, so the same graph runs identically whether it's
-driven by a human at a terminal, a test, or a future API endpoint.
+driven by a human at a terminal, a test, or a future API endpoint. A single run can pause and
+resume through all three gates in sequence — each `resume_run` call picks up wherever the graph
+is currently paused, not just the first gate it ever hit:
 
 ```python
 from orchestrator.graph import start_run, resume_run
 
 state = start_run("make the service more secure", scenario="ambiguous")
-if "__interrupt__" in state:
-    proposal = state["__interrupt__"][0].value
-    # ... show proposal["proposals"] to a human, collect a decision ...
+while "__interrupt__" in state:
+    gate = state["__interrupt__"][0].value
+    # ... show gate to a human, collect a decision ...
     state = resume_run(
         state["run_id"],
         {"approved": True, "approver": "human:sri", "comment": "looks good"},
     )
 ```
 
-Setting `AUTO_APPROVE=1` (see `.env.example`) skips the interactive pause and auto-approves with
-`approver="system:auto_approve"` — this is what CI and the scenario scripts (Phase 13) use, and
-the audit trail records that it was an automatic, not human, approval.
+Setting `AUTO_APPROVE=1` (see `.env.example`) skips the interactive pause at all three gates —
+this is what CI and the scenario scripts (Phase 13) use — and the audit trail records that it
+was an automatic, not human, approval at each one.
 
 Every gate decision is appended to both `state["gate_log"]` (in-memory decision lineage) and the
 durable audit log at `AUDIT_LOG_PATH` (default `./audit_log.jsonl`, one JSON object per line);
@@ -153,4 +176,7 @@ the model — `state["llm_mode"]` records which path ran (`"live"` or `"mock"`) 
 mock-mode runs are visible in the audit trail rather than silently masquerading as real ones. A
 node only ever downgrades this flag to `"mock"`, never upgrades it, so the flag reflects the
 worst case across the whole run.
-Review and Release Readiness agents land in later phases and extend this same graph.
+
+This is the full seven-gate graph (`requirement → planning → architecture → coding →
+{testing, documentation} → gate4_sync → review → release`). Re-planning, retries, fallback,
+rollback, and safe-stop controls (Section 3.4/3.2 of the plan) land in Phase 11.
