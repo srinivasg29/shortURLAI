@@ -46,7 +46,7 @@ def _quality_summary(state: OrchestratorState) -> tuple[str, str]:
     if is_live():
         try:
             prompt = f"Requirement: {state.get('normalized_spec', '')}\n\nRun facts: {facts}"
-            text = call_llm(SYSTEM_PROMPT, prompt).strip()
+            text = call_llm(SYSTEM_PROMPT, prompt, node="review_agent").strip()
             if text:
                 return text, "live"
         except Exception:

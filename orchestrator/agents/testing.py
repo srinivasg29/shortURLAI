@@ -60,7 +60,7 @@ def _attempt_live_tests(target_path: str, normalized_spec: str) -> TestResult | 
     prompt = f"Requirement: {normalized_spec}\n\nPath: {target_path}\n\nContent:\n{content}"
 
     try:
-        raw = call_llm(SYSTEM_PROMPT, prompt, max_tokens=4096)
+        raw = call_llm(SYSTEM_PROMPT, prompt, max_tokens=4096, node="testing_agent")
     except Exception:
         return None
 

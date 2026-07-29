@@ -67,7 +67,7 @@ def _heuristic_requirement_analysis(raw_requirement: str) -> dict[str, Any]:
 def _analyze(raw_requirement: str) -> tuple[dict[str, Any], str]:
     if is_live():
         try:
-            raw = call_llm(SYSTEM_PROMPT, raw_requirement)
+            raw = call_llm(SYSTEM_PROMPT, raw_requirement, node="requirement_agent")
             return _extract_json(raw), "live"
         except Exception:
             pass

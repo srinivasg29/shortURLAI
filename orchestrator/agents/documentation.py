@@ -55,6 +55,7 @@ def run(state: OrchestratorState) -> OrchestratorState:
             raw = call_llm(
                 SYSTEM_PROMPT,
                 f"Requirement: {normalized_spec}\n\nChange summary: {applied_diff['summary']}",
+                node="documentation_agent",
             )
             candidate = raw.strip()
             if candidate:

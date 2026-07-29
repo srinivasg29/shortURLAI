@@ -80,7 +80,7 @@ def _attempt_live_edit(
     )
 
     try:
-        raw = call_llm(SYSTEM_PROMPT, prompt, max_tokens=4096)
+        raw = call_llm(SYSTEM_PROMPT, prompt, max_tokens=4096, node="coding_agent")
     except Exception:
         return None
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
@@ -9,6 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 
+from app.tracing import get_tracer
 from orchestrator import audit
 from orchestrator.agents import (
     architecture,
@@ -27,79 +30,116 @@ from orchestrator.state import OrchestratorState
 
 MAX_REPLANS = 2
 
+_tracer = get_tracer("orchestrator.graph")
 
+
+def _traced(node_name: str) -> Callable:
+    """Wraps a node function in an OpenTelemetry span - "OpenTelemetry
+    traces across FastAPI + LangGraph" per the plan's Observability
+    section. The interrupt() calls inside Architecture/Review/Release/
+    safe_stop raise to unwind the stack for pausing; a `with` block still
+    closes the span correctly when that happens, it just doesn't get to
+    record a gate outcome for that (incomplete) invocation."""
+
+    def decorator(fn: Callable[[OrchestratorState], OrchestratorState]):
+        @functools.wraps(fn)
+        def wrapper(state: OrchestratorState) -> OrchestratorState:
+            with _tracer.start_as_current_span(node_name) as span:
+                span.set_attribute("run_id", state.get("run_id") or "unknown")
+                result = fn(state)
+                for entry in result.get("gate_log", []):
+                    span.set_attribute("gate_id", entry["gate_id"])
+                    span.set_attribute("gate_passed", entry["passed"])
+                return result
+
+        return wrapper
+
+    return decorator
+
+
+def _log_gates(state: OrchestratorState, result: OrchestratorState) -> None:
+    run_id = state.get("run_id")
+    for entry in result.get("gate_log", []):
+        audit.append_event({"type": "gate", "run_id": run_id, **entry})
+
+
+@_traced("requirement")
 def _requirement_node(state: OrchestratorState) -> OrchestratorState:
     result = requirement.run(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     return result
 
 
+@_traced("planning")
 def _planning_node(state: OrchestratorState) -> OrchestratorState:
     result = planning.run(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     return result
 
 
+@_traced("architecture")
 def _architecture_node(state: OrchestratorState) -> OrchestratorState:
     result = architecture.run(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     return result
 
 
+@_traced("coding")
 def _coding_node(state: OrchestratorState) -> OrchestratorState:
     result = coding.run(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     for diff in result.get("code_diffs", []):
-        audit.append_event({"type": "code_diff", **diff})
+        audit.append_event({"type": "code_diff", "run_id": state.get("run_id"), **diff})
     return result
 
 
+@_traced("testing")
 def _testing_node(state: OrchestratorState) -> OrchestratorState:
     result = testing.run(state)
     for tr in result.get("test_results", []):
-        audit.append_event({"type": "test_result", **tr})
+        audit.append_event({"type": "test_result", "run_id": state.get("run_id"), **tr})
     return result
 
 
+@_traced("documentation")
 def _documentation_node(state: OrchestratorState) -> OrchestratorState:
     result = documentation.run(state)
     for diff in result.get("doc_diffs", []):
-        audit.append_event({"type": "doc_diff", **diff})
+        audit.append_event({"type": "doc_diff", "run_id": state.get("run_id"), **diff})
     return result
 
 
+@_traced("gate4_sync")
 def _gate4_sync_node(state: OrchestratorState) -> OrchestratorState:
     result = sync.run_gate4(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     return result
 
 
+@_traced("review")
 def _review_node(state: OrchestratorState) -> OrchestratorState:
     result = review.run(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     return result
 
 
+@_traced("release")
 def _release_node(state: OrchestratorState) -> OrchestratorState:
     result = release.run(state)
-    for entry in result.get("gate_log", []):
-        audit.append_event({"type": "gate", **entry})
+    _log_gates(state, result)
     return result
 
 
+@_traced("replan_node")
 def _replan_node(state: OrchestratorState) -> OrchestratorState:
     result = replan.run(state)
+    run_id = state.get("run_id")
     for entry in result.get("replan_log", []):
-        audit.append_event({"type": "replan", **entry})
+        audit.append_event({"type": "replan", "run_id": run_id, **entry})
     return result
 
 
+@_traced("safe_stop_node")
 def _safe_stop_node(state: OrchestratorState) -> OrchestratorState:
     # safe_stop.run() logs its own audit event (reason + rollback outcome)
     # since safe_stopped/safe_stop_reason are scalar state fields, not a
@@ -214,7 +254,10 @@ def start_run(raw_requirement: str, scenario: str = "adhoc") -> OrchestratorStat
         "raw_requirement": raw_requirement,
     }
     config = {"configurable": {"thread_id": run_id}}
-    result = app.invoke(initial_state, config)
+    with _tracer.start_as_current_span("run") as span:
+        span.set_attribute("run_id", run_id)
+        span.set_attribute("scenario", scenario)
+        result = app.invoke(initial_state, config)
     result.setdefault("run_id", run_id)
     return result
 
@@ -233,4 +276,6 @@ def resume_run(run_id: str, decision: dict[str, Any] | bool) -> OrchestratorStat
             "timestamp": datetime.now(UTC).isoformat(),
         }
     )
-    return app.invoke(Command(resume=decision), config)
+    with _tracer.start_as_current_span("run_resume") as span:
+        span.set_attribute("run_id", run_id)
+        return app.invoke(Command(resume=decision), config)
