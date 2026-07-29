@@ -60,16 +60,21 @@ the validation/expiration/error paths.
 The orchestrator is a [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph` over a
 single typed `OrchestratorState` (`orchestrator/state.py`) threaded through every node; list-valued
 fields (`gate_log`, `architecture_decisions`, etc.) use an `operator.add` reducer so nodes append
-to the decision lineage instead of overwriting it. So far the graph has one node:
+to the decision lineage instead of overwriting it. So far the graph runs two nodes in sequence:
 
 - **Requirement Agent** (`orchestrator/agents/requirement.py`) — interprets a raw requirement,
   flags ambiguity, and normalizes it into an engineering-ready spec. Evaluates **Gate 0**
   (intake normalized, ambiguity flagged) automatically.
+- **Planning Agent** (`orchestrator/agents/planning.py`) — decomposes the normalized spec into a
+  `task_graph` of tasks with explicit `depends_on` edges, mirroring the orchestrator's own
+  downstream phases (design → implement → test/document → review). Evaluates **Gate 1**
+  (task graph + dependencies set) automatically, validating the graph is acyclic, has no
+  duplicate task ids, and every `depends_on` reference resolves.
 
 ```python
-from orchestrator.graph import run_requirement_intake
+from orchestrator.graph import run_graph
 
-state = run_requirement_intake("make the service more secure", scenario="ambiguous")
+state = run_graph("make the service more secure", scenario="ambiguous")
 ```
 
 Every gate decision is appended to both `state["gate_log"]` (in-memory decision lineage) and the
@@ -77,6 +82,8 @@ durable audit log at `AUDIT_LOG_PATH` (default `./audit_log.jsonl`, one JSON obj
 
 When `ANTHROPIC_API_KEY` is unset, agents fall back to deterministic heuristics instead of calling
 the model — `state["llm_mode"]` records which path ran (`"live"` or `"mock"`) for every run, so
-mock-mode runs are visible in the audit trail rather than silently masquerading as real ones.
-Planning, Architecture, Coding, Testing, Documentation, Review, and Release Readiness agents land
-in later phases and extend this same graph.
+mock-mode runs are visible in the audit trail rather than silently masquerading as real ones. A
+node only ever downgrades this flag to `"mock"`, never upgrades it, so the flag reflects the
+worst case across the whole run.
+Architecture, Coding, Testing, Documentation, Review, and Release Readiness agents land in later
+phases and extend this same graph.
