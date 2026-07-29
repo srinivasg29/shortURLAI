@@ -81,3 +81,4 @@ class OrchestratorState(TypedDict, total=False):
     replan_count: int
     safe_stopped: bool
     safe_stop_reason: str
+    released: bool
