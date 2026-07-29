@@ -107,6 +107,54 @@ def test_shorten_rejects_too_short_custom_alias(client):
     assert resp.status_code == 422
 
 
+def test_shorten_returns_429_once_rate_limit_exceeded(client, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("RATE_LIMIT_SHORTEN_PER_MINUTE", "2")
+    get_settings.cache_clear()
+
+    for _ in range(2):
+        resp = client.post("/api/shorten", json={"target_url": "https://example.com/rl"})
+        assert resp.status_code == 201
+
+    resp = client.post("/api/shorten", json={"target_url": "https://example.com/rl"})
+    assert resp.status_code == 429
+
+    get_settings.cache_clear()
+
+
+def test_redirect_returns_429_once_rate_limit_exceeded(client, monkeypatch):
+    from app.config import get_settings
+
+    create_resp = client.post("/api/shorten", json={"target_url": "https://example.com/rl2"})
+    code = create_resp.json()["code"]
+
+    monkeypatch.setenv("RATE_LIMIT_REDIRECT_PER_MINUTE", "2")
+    get_settings.cache_clear()
+
+    for _ in range(2):
+        resp = client.get(f"/{code}", follow_redirects=False)
+        assert resp.status_code == 302
+
+    resp = client.get(f"/{code}", follow_redirects=False)
+    assert resp.status_code == 429
+
+    get_settings.cache_clear()
+
+
+def test_shorten_rate_limit_disabled_when_set_to_zero(client, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("RATE_LIMIT_SHORTEN_PER_MINUTE", "0")
+    get_settings.cache_clear()
+
+    for _ in range(10):
+        resp = client.post("/api/shorten", json={"target_url": "https://example.com/unlimited"})
+        assert resp.status_code == 201
+
+    get_settings.cache_clear()
+
+
 def test_shorten_returns_503_when_codes_exhausted(client, monkeypatch):
     import app.routers.shorten as shorten_module
     from app.services.shortener import CodeGenerationExhausted

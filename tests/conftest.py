@@ -30,6 +30,19 @@ def _clean_tables():
             conn.execute(table.delete())
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    # The rate limiter is a module-level singleton (app/rate_limit.py) so
+    # its in-memory counts persist across tests in the same process unless
+    # explicitly cleared - without this, unrelated tests sharing the
+    # default TestClient IP could start tripping each other's limits.
+    from app.rate_limit import reset_rate_limiter
+
+    reset_rate_limiter()
+    yield
+    reset_rate_limiter()
+
+
 @pytest.fixture()
 def db_session():
     db = SessionLocal()
