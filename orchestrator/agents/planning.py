@@ -29,15 +29,34 @@ def _extract_json(raw: str) -> dict[str, Any]:
     return json.loads(match.group(0) if match else raw)
 
 
-def default_task_graph(normalized_spec: str) -> dict[str, Any]:
+def default_task_graph(normalized_spec: str, replan_reason: str | None = None) -> dict[str, Any]:
     """Deterministic fallback: a standard design -> implement -> (test + document) -> review
-    decomposition, mirroring the orchestrator's own downstream phases."""
-    return {
-        "tasks": [
+    decomposition, mirroring the orchestrator's own downstream phases.
+
+    When re-entered after a re-plan (replan_reason set), inserts a
+    "remediate" task ahead of "design" that names the specific failure that
+    triggered the re-plan - this is what makes a re-plan a genuine
+    plan-graph change rather than a no-op retry that just re-derives the
+    same task_graph from the same normalized_spec."""
+    design_depends_on: list[str] = []
+    tasks: list[dict[str, Any]] = []
+
+    if replan_reason:
+        tasks.append(
+            {
+                "id": "remediate",
+                "description": f"Address prior failure before re-attempting: {replan_reason}",
+                "depends_on": [],
+            }
+        )
+        design_depends_on = ["remediate"]
+
+    tasks.extend(
+        [
             {
                 "id": "design",
                 "description": f"Design the change: {normalized_spec}",
-                "depends_on": [],
+                "depends_on": design_depends_on,
             },
             {
                 "id": "implement",
@@ -60,7 +79,8 @@ def default_task_graph(normalized_spec: str) -> dict[str, Any]:
                 "depends_on": ["test", "document"],
             },
         ]
-    }
+    )
+    return {"tasks": tasks}
 
 
 def validate_task_graph(task_graph: dict[str, Any]) -> tuple[bool, str]:
@@ -106,28 +126,42 @@ def validate_task_graph(task_graph: dict[str, Any]) -> tuple[bool, str]:
     return True, "task_graph is acyclic with all dependencies resolvable"
 
 
-def _plan(normalized_spec: str) -> tuple[dict[str, Any], str]:
+def _last_replan_reason(state: OrchestratorState) -> str | None:
+    replan_log = state.get("replan_log", [])
+    return replan_log[-1]["trigger_reason"] if replan_log else None
+
+
+def _plan(normalized_spec: str, replan_reason: str | None) -> tuple[dict[str, Any], str]:
     if is_live():
         try:
-            raw = call_llm(SYSTEM_PROMPT, normalized_spec)
+            prompt = normalized_spec
+            if replan_reason:
+                prompt = (
+                    f"{normalized_spec}\n\nNote: a prior attempt at this failed and the graph "
+                    f"routed back here to re-plan. Reason: {replan_reason}\nAdjust the task "
+                    f"breakdown to address it (e.g. add a remediation task) rather than "
+                    f"repeating the same plan verbatim."
+                )
+            raw = call_llm(SYSTEM_PROMPT, prompt)
             parsed = _extract_json(raw)
             valid, _ = validate_task_graph(parsed)
             if valid:
                 return parsed, "live"
         except Exception:
             pass
-    return default_task_graph(normalized_spec), "mock"
+    return default_task_graph(normalized_spec, replan_reason), "mock"
 
 
 def run(state: OrchestratorState) -> OrchestratorState:
     normalized_spec = state["normalized_spec"]
-    task_graph, llm_mode = _plan(normalized_spec)
+    replan_reason = _last_replan_reason(state)
+    task_graph, llm_mode = _plan(normalized_spec, replan_reason)
 
     valid, detail = validate_task_graph(task_graph)
     if not valid:
         # Even the deterministic fallback must satisfy this; if it somehow
         # doesn't, fail closed rather than hand a broken graph downstream.
-        task_graph = default_task_graph(normalized_spec)
+        task_graph = default_task_graph(normalized_spec, replan_reason)
         valid, detail = validate_task_graph(task_graph)
         llm_mode = "mock"
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import orchestrator.agents.architecture as architecture_module
 import orchestrator.agents.coding as coding_module
 import orchestrator.agents.documentation as documentation_module
@@ -169,32 +171,72 @@ def test_release_readiness_blocks_when_reviewer_rejects(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_resume_run_with_rejection_fails_gate_2(tmp_path, monkeypatch):
+def test_resume_run_with_rejection_at_gate_2_triggers_replan(tmp_path, monkeypatch):
     _force_mock(monkeypatch)
     monkeypatch.setenv("AUTO_APPROVE", "0")
     _use_audit_log(tmp_path, monkeypatch)
 
     paused = start_run("Add rate limiting to POST /api/shorten.", scenario="ambiguous")
-    final = resume_run(
+    after_rejection = resume_run(
         paused["run_id"],
         {"approved": False, "approver": "human:reviewer", "comment": "needs rework"},
     )
 
-    gate_2 = final["gate_log"][2]
+    gate_2 = after_rejection["gate_log"][2]
     assert gate_2["passed"] is False
-    assert final["architecture_decisions"][0]["approved_by"] == "rejected_by:human:reviewer"
-    # Gate 2 rejection doesn't yet halt the graph - conditional routing back
-    # to Planning on rejection is wired in Phase 11 (re-planning). For now
-    # the graph runs straight through to Coding, Testing, and Documentation,
-    # pausing next at Gate 5 same as any other run.
-    assert [g["gate_id"] for g in final["gate_log"]] == [
+    assert after_rejection["architecture_decisions"][0]["approved_by"] == (
+        "rejected_by:human:reviewer"
+    )
+    # Rejection routes back to Planning (bounded), not straight through to
+    # Coding - the graph pauses at a *fresh* Gate 2 proposal instead of
+    # continuing downstream with a rejected design.
+    assert after_rejection["__interrupt__"][0].value["gate_id"] == "gate_2"
+    # gate_0, gate_1, gate_2 from the first attempt, then a second gate_1
+    # from re-entering Planning; Architecture is paused on the fresh Gate 2
+    # proposal, so it hasn't logged a second gate_2 entry yet.
+    assert [g["gate_id"] for g in after_rejection["gate_log"]] == [
         "gate_0",
         "gate_1",
         "gate_2",
-        "gate_3",
-        "gate_4",
+        "gate_1",
     ]
-    assert final["__interrupt__"][0].value["gate_id"] == "gate_5"
+
+    [replan_entry] = after_rejection["replan_log"]
+    assert replan_entry["count"] == 1
+    assert replan_entry["node_re_entered"] == "planning"
+    assert "gate_2" in replan_entry["trigger_reason"]
+
+    # Planning incorporated the rejection into the re-plan, per
+    # planning.default_task_graph's replan_reason handling.
+    task_ids = {t["id"] for t in after_rejection["task_graph"]["tasks"]}
+    assert "remediate" in task_ids
+
+    get_settings.cache_clear()
+
+
+def test_repeated_gate_2_rejection_reaches_safe_stop_after_max_replans(tmp_path, monkeypatch):
+    _force_mock(monkeypatch)
+    monkeypatch.setenv("AUTO_APPROVE", "0")
+    _use_audit_log(tmp_path, monkeypatch)
+
+    state = start_run("Add rate limiting to POST /api/shorten.", scenario="ambiguous")
+    for _ in range(3):
+        assert state["__interrupt__"][0].value["gate_id"] == "gate_2"
+        state = resume_run(
+            state["run_id"],
+            {"approved": False, "approver": "human:reviewer", "comment": "still not it"},
+        )
+
+    # Third rejection exhausts MAX_REPLANS (2) -> safe-stop notification
+    # instead of a fourth Gate 2 pause.
+    assert state["__interrupt__"][0].value["type"] == "safe_stop"
+    assert "gate_2" in state["__interrupt__"][0].value["reason"]
+    assert state["replan_count"] == 2
+    assert len(state["replan_log"]) == 2
+
+    final = resume_run(state["run_id"], {"acknowledged": True})
+    assert "__interrupt__" not in final
+    assert final["safe_stopped"] is True
 
     get_settings.cache_clear()
 
@@ -257,7 +299,7 @@ def test_start_run_writes_audit_log(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_gate4_fails_when_testing_branch_fails_even_if_docs_complete(tmp_path, monkeypatch):
+def test_persistent_gate4_failure_replans_then_safe_stops(tmp_path, monkeypatch):
     _force_mock(monkeypatch)
     monkeypatch.setenv("AUTO_APPROVE", "1")
     _use_audit_log(tmp_path, monkeypatch)
@@ -274,20 +316,135 @@ def test_gate4_fails_when_testing_branch_fails_even_if_docs_complete(tmp_path, m
 
     result = start_run("Add a POST /api/shorten endpoint.", scenario="greenfield")
 
-    gate_4 = next(g for g in result["gate_log"] if g["gate_id"] == "gate_4")
-    assert gate_4["passed"] is False
-    assert "tests: failed/missing" in gate_4["detail"]
-    assert "docs: complete" in gate_4["detail"]
-    # Documentation branch still ran independently of Testing's failure.
-    assert result["doc_diffs"]
-    # Gate 4's failure propagates into Gate 5's auto-approve check, which
-    # fails closed rather than rubber-stamping past a failed sync gate.
-    gate_5 = next(g for g in result["gate_log"] if g["gate_id"] == "gate_5")
-    assert gate_5["passed"] is False
-    # ...which in turn blocks Gate 6's auto-approve.
-    gate_6 = next(g for g in result["gate_log"] if g["gate_id"] == "gate_6")
-    assert gate_6["passed"] is False
-    assert result["released"] is False
+    gate_4_entries = [g for g in result["gate_log"] if g["gate_id"] == "gate_4"]
+    # Initial attempt + 2 re-plans = 3 total attempts before MAX_REPLANS
+    # is exhausted and the graph safe-stops instead of reaching Gate 5.
+    assert len(gate_4_entries) == 3
+    assert all(not g["passed"] for g in gate_4_entries)
+    assert all("tests: failed/missing" in g["detail"] for g in gate_4_entries)
+    # Documentation branch still ran independently of Testing's failure,
+    # every time through the loop.
+    assert len(result["doc_diffs"]) == 3
+
+    assert result["replan_count"] == 2
+    assert [r["node_re_entered"] for r in result["replan_log"]] == ["planning", "planning"]
+    assert result["safe_stopped"] is True
+    assert "gate_4" in result["safe_stop_reason"]
+
+    # Never reached the Review/Release gates in this run.
+    assert not any(g["gate_id"] in ("gate_5", "gate_6") for g in result["gate_log"])
+    assert "released" not in result
+
+    get_settings.cache_clear()
+
+
+def test_safe_stop_rolls_back_last_applied_code_change(tmp_path, monkeypatch):
+    _force_mock(monkeypatch)
+    monkeypatch.setenv("AUTO_APPROVE", "1")
+    _use_audit_log(tmp_path, monkeypatch)
+
+    target_dir = tmp_path / "app"
+    target_dir.mkdir()
+    target_file = target_dir / "shorten.py"
+    before_content = "def before():\n    pass\n"
+    target_file.write_text(before_content, encoding="utf-8")
+    monkeypatch.setattr(coding_module, "_repo_root", lambda: tmp_path)
+
+    calls = {"n": 0}
+
+    def fake_coding_run(state):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # First attempt actually applies a change (like a real live-mode
+            # edit would) before its own Gate 3 check fails.
+            target_file.write_text("def after():\n    pass\n", encoding="utf-8")
+            diff = {
+                "path": "app/shorten.py",
+                "diff": "d",
+                "summary": "applied",
+                "applied": True,
+                "before": before_content,
+            }
+        else:
+            diff = {
+                "path": "UNSPECIFIED",
+                "diff": "",
+                "summary": "",
+                "applied": False,
+                "before": "",
+            }
+        gate_entry = {
+            "gate_id": "gate_3",
+            "node": "coding_agent",
+            "passed": False,
+            "approver": "system",
+            "entry_criteria": "",
+            "exit_criteria": "",
+            "timestamp": "t",
+            "detail": "forced failure",
+        }
+        return {"code_diffs": [diff], "gate_log": [gate_entry]}
+
+    monkeypatch.setattr(coding_module, "run", fake_coding_run)
+
+    result = start_run("Add a POST /api/shorten endpoint.", scenario="greenfield")
+
+    assert result["safe_stopped"] is True
+    # Rolled back to the pre-change content, not left with the first
+    # attempt's unresolved (Gate-3-failing) edit sitting on disk.
+    assert target_file.read_text(encoding="utf-8") == before_content
+
+    get_settings.cache_clear()
+
+
+def test_safe_stop_interrupts_with_reason_when_not_auto_approved(tmp_path, monkeypatch):
+    _force_mock(monkeypatch)
+    monkeypatch.setenv("AUTO_APPROVE", "0")
+    _use_audit_log(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        coding_module,
+        "run",
+        lambda state: {
+            "code_diffs": [
+                {"path": "UNSPECIFIED", "diff": "", "summary": "", "applied": False, "before": ""}
+            ],
+            "gate_log": [
+                {
+                    "gate_id": "gate_3",
+                    "node": "coding_agent",
+                    "passed": False,
+                    "approver": "system",
+                    "entry_criteria": "",
+                    "exit_criteria": "",
+                    "timestamp": "t",
+                    "detail": "forced failure",
+                }
+            ],
+        },
+    )
+
+    state = start_run("Add a POST /api/shorten endpoint.", scenario="greenfield")
+    # Every re-plan re-enters Architecture, which also pauses interactively
+    # at Gate 2 - drive through those until the safe_stop notification
+    # replaces what would otherwise be a fourth Gate 2 pause.
+    payload = None
+    for _ in range(5):
+        assert "__interrupt__" in state
+        payload = state["__interrupt__"][0].value
+        if payload.get("type") == "safe_stop":
+            break
+        assert payload["gate_id"] == "gate_2"
+        state = resume_run(state["run_id"], {"approved": True, "approver": "human:architect"})
+    else:
+        pytest.fail("never reached the safe_stop interrupt")
+
+    assert "gate_3" in payload["reason"]
+    assert state["replan_count"] == 2
+
+    final = resume_run(state["run_id"], {"acknowledged": True})
+    assert "__interrupt__" not in final
+    assert final["safe_stopped"] is True
 
     get_settings.cache_clear()
 

@@ -100,6 +100,7 @@ def _attempt_live_edit(
         "diff": _unified_diff(path, before, after),
         "summary": f"Applied live-LLM edit to {path}",
         "applied": True,
+        "before": before,
     }
 
 
@@ -115,7 +116,23 @@ def _proposal_only(path: str | None, normalized_spec: str) -> CodeDiff:
             "Proposal only (no live LLM available, and no impacted module could be "
             f"identified) for: {normalized_spec}"
         )
-    return {"path": path, "diff": "", "summary": summary, "applied": False}
+    return {"path": path, "diff": "", "summary": summary, "applied": False, "before": ""}
+
+
+def rollback_last_applied(state: OrchestratorState) -> str | None:
+    """Reverts the most recently applied code change back to its
+    pre-change content - the plan's Rollback control. Returns a human
+    -readable description of what happened, or None if there was nothing
+    to revert (mock mode never applies anything, so this is a no-op in
+    every automated test run)."""
+    code_diffs = state.get("code_diffs", [])
+    applied = next((d for d in reversed(code_diffs) if d.get("applied")), None)
+    if applied is None:
+        return None
+
+    full_path = _repo_root() / applied["path"]
+    full_path.write_text(applied["before"], encoding="utf-8")
+    return f"reverted {applied['path']} to its pre-change content"
 
 
 def run(state: OrchestratorState) -> OrchestratorState:

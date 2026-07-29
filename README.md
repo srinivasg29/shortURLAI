@@ -178,5 +178,63 @@ node only ever downgrades this flag to `"mock"`, never upgrades it, so the flag 
 worst case across the whole run.
 
 This is the full seven-gate graph (`requirement → planning → architecture → coding →
-{testing, documentation} → gate4_sync → review → release`). Re-planning, retries, fallback,
-rollback, and safe-stop controls (Section 3.4/3.2 of the plan) land in Phase 11.
+{testing, documentation} → gate4_sync → review → release`).
+
+### Re-planning, retry, fallback, rollback, safe-stop
+
+Three checkpoints — Gate 2 (Architecture), Gate 3 (Coding), and Gate 4 (`gate4_sync`, standing in
+for Testing since re-routing away from a fan-in node isn't safe — see below) — are wired as
+**conditional edges**, not plain ones:
+
+```
+                 pass
+architecture ----------> coding
+     |  fail                |  fail
+     v                      v
+ (replan / safe-stop)  (replan / safe-stop)
+
+coding --pass--> [testing, documentation] --> gate4_sync --pass--> review
+                                                    |  fail
+                                                    v
+                                          (replan / safe-stop)
+```
+
+- **Re-plan**: on failure, if `replan_count < MAX_REPLANS` (2), routes to `replan_node`
+  (`orchestrator/agents/replan.py`), which reads the failing gate's detail off `gate_log[-1]`,
+  appends a `replan_log` entry, and loops back to **Planning** — not a retry of the same node,
+  a change to the task graph itself. `planning.py` reads that reason back out
+  (`replan_log[-1]["trigger_reason"]`) and inserts a `remediate` task naming the specific
+  failure, so a re-plan is a genuine plan change rather than re-deriving the same task_graph
+  from an unchanged `normalized_spec`.
+- **Safe-stop**: once `replan_count` hits `MAX_REPLANS`, routes to `safe_stop_node`
+  (`orchestrator/agents/safe_stop.py`) instead of a third re-plan. It rolls back any applied-
+  but-unresolved code change (see Rollback below), sets `state["safe_stopped"]` /
+  `state["safe_stop_reason"]`, and — unless `AUTO_APPROVE` is set — pauses with an `interrupt()`
+  notification (`{"type": "safe_stop", "reason": ..., "rollback": ...}`) so a human can inspect
+  what happened. It's a notification handoff, not an approval gate: there's nothing to approve,
+  and any resume value just lets the run finish. Under `AUTO_APPROVE`, the notification is
+  skipped but the halt and rollback still happen, so CI doesn't hang.
+- **Retry**: `orchestrator/llm.py`'s `call_llm` retries the same call up to `MAX_RETRIES` (2)
+  times on any failure before raising — distinct from re-plan (same node, same inputs, not a
+  task-graph change) and logged per attempt as an `llm_retry` audit event. Only once retries are
+  exhausted does an agent's existing except-block **Fallback** (the deterministic heuristic every
+  agent has had since Phase 5) take over.
+- **Rollback**: `coding.rollback_last_applied()` finds the most recent `code_diffs` entry with
+  `applied: True` and writes its `before` content back to disk, undoing an unresolved change
+  rather than leaving a broken edit sitting in the working tree. Runs automatically inside
+  `safe_stop_node` — a system cleanup action, not something that waits on human sign-off.
+
+A conditional router can only return a single node, but `coding`'s "pass" outcome needs to reach
+*two* nodes (`testing` and `documentation`) — LangGraph supports this by letting a router return
+a list of target names instead of one, which is how the fan-out and the re-plan/safe-stop routing
+share the same conditional edge. This was verified with a throwaway script (bounded loop reaching
+safe-stop after exactly `MAX_REPLANS` iterations) before wiring the real agents — see
+`test_persistent_gate4_failure_replans_then_safe_stops` and
+`test_repeated_gate_2_rejection_reaches_safe_stop_after_max_replans` for the equivalent behavior
+through the real graph.
+
+Testing (not Coding) is the literal trigger named in the plan for the third checkpoint, but
+Testing is a parallel branch feeding into `gate4_sync`'s fan-in — conditionally routing *away*
+from a fan-in predecessor risks gate4_sync waiting on an edge that never fires. Checking Gate 4
+after the sync point achieves the same effect safely: in this design, `gate4_sync` can only fail
+because Testing failed (Documentation always trivially "completes"), so it's a faithful stand-in.

@@ -16,12 +16,16 @@ from orchestrator.agents import (
     documentation,
     planning,
     release,
+    replan,
     requirement,
     review,
+    safe_stop,
     sync,
     testing,
 )
 from orchestrator.state import OrchestratorState
+
+MAX_REPLANS = 2
 
 
 def _requirement_node(state: OrchestratorState) -> OrchestratorState:
@@ -89,6 +93,47 @@ def _release_node(state: OrchestratorState) -> OrchestratorState:
     return result
 
 
+def _replan_node(state: OrchestratorState) -> OrchestratorState:
+    result = replan.run(state)
+    for entry in result.get("replan_log", []):
+        audit.append_event({"type": "replan", **entry})
+    return result
+
+
+def _safe_stop_node(state: OrchestratorState) -> OrchestratorState:
+    # safe_stop.run() logs its own audit event (reason + rollback outcome)
+    # since safe_stopped/safe_stop_reason are scalar state fields, not a
+    # list this wrapper can iterate the way it does for gate_log/replan_log.
+    return safe_stop.run(state)
+
+
+def _make_gate_router(gate_id: str):
+    """Shared routing logic for the three re-plan checkpoints (Architecture
+    / Gate 2, Coding / Gate 3, gate4_sync / Gate 4 standing in for Testing -
+    see README for why gate4_sync is used instead of the Testing node
+    directly). Returns "pass", "replan", or "safe_stop"; callers map those
+    labels to actual node names via path_map."""
+
+    def _router(state: OrchestratorState) -> str:
+        matching = [g for g in state.get("gate_log", []) if g["gate_id"] == gate_id]
+        passed = matching[-1]["passed"] if matching else True
+        if passed:
+            return "pass"
+        return "replan" if state.get("replan_count", 0) < MAX_REPLANS else "safe_stop"
+
+    return _router
+
+
+def _coding_router(state: OrchestratorState) -> list[str]:
+    matching = [g for g in state.get("gate_log", []) if g["gate_id"] == "gate_3"]
+    passed = matching[-1]["passed"] if matching else True
+    if passed:
+        return ["testing", "documentation"]
+    if state.get("replan_count", 0) < MAX_REPLANS:
+        return ["replan_node"]
+    return ["safe_stop_node"]
+
+
 @lru_cache
 def build_graph():
     """Compiled once and cached: the checkpointer backing the human-approval
@@ -104,32 +149,55 @@ def build_graph():
     graph.add_node("gate4_sync", _gate4_sync_node)
     graph.add_node("review", _review_node)
     graph.add_node("release", _release_node)
+    graph.add_node("replan_node", _replan_node)
+    graph.add_node("safe_stop_node", _safe_stop_node)
 
     graph.set_entry_point("requirement")
     graph.add_edge("requirement", "planning")
     graph.add_edge("planning", "architecture")
-    graph.add_edge("architecture", "coding")
 
-    # Fan-out: Testing and Documentation both run off Coding's output.
-    graph.add_edge("coding", "testing")
-    graph.add_edge("coding", "documentation")
-    # Fan-in: gate4_sync only runs once both branches have completed: this
-    # is what makes Gate 4 a real synchronization point, not two independent
-    # checks that happen to share a name.
+    # Gate 2 checkpoint: Architecture rejected -> re-plan (bounded) -> safe-stop.
+    graph.add_conditional_edges(
+        "architecture",
+        _make_gate_router("gate_2"),
+        {"pass": "coding", "replan": "replan_node", "safe_stop": "safe_stop_node"},
+    )
+
+    # Gate 3 checkpoint: Coding's build/static checks failed -> re-plan ->
+    # safe-stop. On pass, fans out to the parallel Testing/Documentation
+    # branch in the same conditional edge (a router can return a list of
+    # target nodes to fan out, same as an unconditional edge pair would).
+    graph.add_conditional_edges(
+        "coding",
+        _coding_router,
+        ["testing", "documentation", "replan_node", "safe_stop_node"],
+    )
     graph.add_edge("testing", "gate4_sync")
     graph.add_edge("documentation", "gate4_sync")
 
-    graph.add_edge("gate4_sync", "review")
+    # Gate 4 checkpoint (standing in for "Testing", per the plan's trigger
+    # list) - tests failing is what can make gate4_sync fail, since docs
+    # always trivially "complete" in this design.
+    graph.add_conditional_edges(
+        "gate4_sync",
+        _make_gate_router("gate_4"),
+        {"pass": "review", "replan": "replan_node", "safe_stop": "safe_stop_node"},
+    )
+
     graph.add_edge("review", "release")
     graph.add_edge("release", END)
+
+    graph.add_edge("replan_node", "planning")
+    graph.add_edge("safe_stop_node", END)
 
     return graph.compile(checkpointer=InMemorySaver())
 
 
 def start_run(raw_requirement: str, scenario: str = "adhoc") -> OrchestratorState:
     """Starts a new run. If AUTO_APPROVE is unset, this returns as soon as the
-    graph hits Gate 2 — the returned state carries an "__interrupt__" key;
-    call resume_run(state["run_id"], decision) to continue."""
+    graph hits a human gate (2, 5, 6) or a safe-stop notification — the
+    returned state carries an "__interrupt__" key; call
+    resume_run(state["run_id"], decision) to continue."""
     app = build_graph()
     run_id = str(uuid.uuid4())
     audit.append_event(
@@ -152,8 +220,9 @@ def start_run(raw_requirement: str, scenario: str = "adhoc") -> OrchestratorStat
 
 
 def resume_run(run_id: str, decision: dict[str, Any] | bool) -> OrchestratorState:
-    """Resumes a run paused at a human-approval gate with the human's decision,
-    e.g. {"approved": True, "approver": "human:sri", "comment": "looks good"}."""
+    """Resumes a run paused at a human-approval gate or a safe-stop
+    notification with the human's decision, e.g.
+    {"approved": True, "approver": "human:sri", "comment": "looks good"}."""
     app = build_graph()
     config = {"configurable": {"thread_id": run_id}}
     audit.append_event(
