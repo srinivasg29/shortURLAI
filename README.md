@@ -5,17 +5,23 @@ orchestrator that coordinates requirement understanding, planning, architecture,
 review, and documentation for changes to this same codebase — with human approval gates, bounded
 re-planning, and audit-grade traceability.
 
-> Status: under active build-out. This README is filled in incrementally per phase; see
-> [docs/workflow_gate_reference.md](docs/workflow_gate_reference.md) and
-> [FINAL_ENGINEERING_SUMMARY.md](FINAL_ENGINEERING_SUMMARY.md) once those phases land.
+> All 14 phases complete. See [`FINAL_ENGINEERING_SUMMARY.md`](FINAL_ENGINEERING_SUMMARY.md) for
+> rationale, risks/trade-offs, assumptions, and known limitations, and
+> [`docs/workflow_gate_reference.md`](docs/workflow_gate_reference.md) for a condensed
+> gate-by-gate reference table.
 
 ## Project Overview
 
-- `app/` — the FastAPI URL Shortener service (create, redirect, analytics).
+- `app/` — the FastAPI URL Shortener service (create, redirect, analytics, rate limiting).
 - `orchestrator/` — the LangGraph agentic orchestration layer that plans and implements changes
   to `app/`, gated by automated checks and human approval.
-- `scenarios/` — three end-to-end orchestrator runs (greenfield, brownfield, ambiguous) with
-  committed transcripts under `scenarios/transcripts/`.
+- `scenarios/` — three end-to-end orchestrator runs (greenfield, brownfield, ambiguous), each
+  pairing a real committed audit-log transcript with an actual shipped code change — see
+  [Three Scenarios](#three-scenarios) below.
+- `observability/` — Grafana dashboard + Prometheus scrape config for the metrics this service
+  and the orchestrator both expose.
+- `docs/` — condensed reference material (gate table, controls) that complements this README's
+  narrative walkthrough.
 
 ## Setup
 
@@ -32,8 +38,10 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
-- `POST /api/shorten` — create a short URL (`{"target_url": "https://..."}`).
-- `GET /{code}` — 302 redirect to the target URL; records a click asynchronously.
+- `POST /api/shorten` — create a short URL (`{"target_url": "https://...", "custom_alias": "...",
+  "expires_in_days": ...}`, all but `target_url` optional). Rate limited (default 20/min/IP).
+- `GET /{code}` — 302 redirect to the target URL; records a click asynchronously. Rate limited
+  (default 120/min/IP).
 - `GET /api/urls/{code}/stats` — click count and metadata for a short code.
 - `GET /health` — liveness check.
 - `GET /metrics` — Prometheus metrics for the HTTP service itself.
@@ -43,20 +51,27 @@ uvicorn app.main:app --reload
 - `GET /docs` — interactive OpenAPI docs (`/openapi.json` for the raw schema).
 
 By default the service uses a local SQLite file (`data/shortener.db`) and an in-process TTL
-cache for the redirect hot path. Set `REDIS_URL` in `.env` to use Redis instead.
+cache for the redirect hot path. Set `REDIS_URL` in `.env` to use Redis instead. Rate limits
+(`RATE_LIMIT_SHORTEN_PER_MINUTE`, `RATE_LIMIT_REDIRECT_PER_MINUTE` in `.env`) are also
+in-process/single-instance; set either to `0` to disable.
 
 ## Testing
 
 ```bash
-pytest                                   # unit + integration
-pytest --cov=app --cov-report=term-missing
+pytest                                                     # unit + integration
+pytest --cov=app --cov=orchestrator --cov-report=term-missing
 ```
 
-Tests run against a temporary SQLite file (never the dev `data/shortener.db`) with
-Redis disabled, so no external services are required. `tests/unit/` covers the shortcode
-generator, in-process cache, and the shortener service layer directly; `tests/integration/`
-drives the full FastAPI app through `TestClient` for the create → redirect → stats flow and
-the validation/expiration/error paths.
+165 tests, 99% combined line coverage across `app/` and `orchestrator/`. Tests run against a
+temporary SQLite file (never the dev `data/shortener.db`), Redis disabled, no `ANTHROPIC_API_KEY`,
+and a reset rate limiter/audit log per test, so no external services or shared state are
+required or leak between tests. `tests/unit/` covers services, agents, and infrastructure
+modules directly with mocked boundaries; `tests/integration/` drives the real FastAPI app via
+`TestClient` and the real LangGraph graph via `start_run`/`resume_run` — including multi-gate
+interactive pause/resume sequences, the bounded re-plan → safe-stop loop, and rollback of a real
+(temp-directory) file. Concurrency claims are validated with real multi-threaded workloads
+against real SQLite sessions, not simulated — see
+[`scenarios/brownfield.md`](scenarios/brownfield.md).
 
 ## Running the Agentic Orchestrator
 
@@ -264,3 +279,29 @@ because Testing failed (Documentation always trivially "completes"), so it's a f
 - **Run timeline** — `GET /orchestrator/runs/{run_id}` reconstructs one run's full decision
   lineage from the audit log as JSON, independent of whether that run's in-memory
   `OrchestratorState` still exists.
+
+## Three Scenarios
+
+Each pairs a real orchestrator run (driven interactively through all seven gates, with a
+committed audit-log transcript) against the exact scenario requirement text, with an actual
+shipped code change validated the same way that run's Gate 3/4/5 would validate it:
+
+| Scenario | Requirement | What it demonstrates | Write-up |
+|---|---|---|---|
+| Greenfield | Custom vanity-alias with collision handling | Full graph run + Gate 2 approval for a new uniqueness constraint | [`scenarios/greenfield.md`](scenarios/greenfield.md) |
+| Brownfield | Thread-safe click-counter refactor | Codebase reasoning (impacted module + data flow) before changing existing code, and a regression risk confirmed empirically (14/200 clicks recorded pre-fix under a real concurrent workload) | [`scenarios/brownfield.md`](scenarios/brownfield.md) |
+| Ambiguous | "Make the service more secure" | Requirement Agent surfacing 2–3 concrete interpretations and a human confirming scope at Gate 2 | [`scenarios/ambiguous.md`](scenarios/ambiguous.md) |
+
+Every scenario doc is explicit about where this environment's lack of a live `ANTHROPIC_API_KEY`
+shows up (`code_diffs[].applied == false` in the transcript — mock mode never touches disk) and
+where the real implementation actually lives (directly in that scenario's PR).
+
+## Limitations & Future Work
+
+Known limitations, why they're scoped out, and what a production hardening pass would add are
+in [`FINAL_ENGINEERING_SUMMARY.md`](FINAL_ENGINEERING_SUMMARY.md#5-known-limitations-and-a-production-hardening-path)
+rather than duplicated here — briefly: re-planning doesn't route back to the Requirement Agent,
+the Coding Agent is single-file-per-run, the rate limiter and cache are both in-process/
+single-instance, no scenario in this environment exercised a real live-LLM run, the LangGraph
+checkpointer is in-memory (a paused run doesn't survive a restart), and there's no
+authentication anywhere in this prototype.
