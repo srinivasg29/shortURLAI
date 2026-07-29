@@ -42,6 +42,19 @@ uvicorn app.main:app --reload
 By default the service uses a local SQLite file (`data/shortener.db`) and an in-process TTL
 cache for the redirect hot path. Set `REDIS_URL` in `.env` to use Redis instead.
 
+## Testing
+
+```bash
+pytest                                   # unit + integration
+pytest --cov=app --cov-report=term-missing
+```
+
+Tests run against a temporary SQLite file (never the dev `data/shortener.db`) with
+Redis disabled, so no external services are required. `tests/unit/` covers the shortcode
+generator, in-process cache, and the shortener service layer directly; `tests/integration/`
+drives the full FastAPI app through `TestClient` for the create → redirect → stats flow and
+the validation/expiration/error paths.
+
 ## Running the Agentic Orchestrator
 
 _Filled in during Phase 5+._

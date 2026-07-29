@@ -59,7 +59,14 @@ def get_by_code(db: Session, code: str) -> ShortUrl | None:
 
 
 def is_expired(short_url: ShortUrl) -> bool:
-    return short_url.expires_at is not None and short_url.expires_at < datetime.now(UTC)
+    expires_at = short_url.expires_at
+    if expires_at is None:
+        return False
+    # SQLite round-trips DateTime(timezone=True) values as naive; treat a
+    # naive value as UTC rather than let the aware/naive comparison raise.
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return expires_at < datetime.now(UTC)
 
 
 def record_click(db: Session, short_url: ShortUrl) -> None:
