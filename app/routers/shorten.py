@@ -4,7 +4,12 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.schemas import ShortenRequest, ShortenResponse
-from app.services.shortener import CodeGenerationExhausted, InvalidTargetUrl, create_short_url
+from app.services.shortener import (
+    AliasAlreadyTaken,
+    CodeGenerationExhausted,
+    InvalidTargetUrl,
+    create_short_url,
+)
 
 router = APIRouter(tags=["shorten"])
 
@@ -15,10 +20,15 @@ def shorten_url(payload: ShortenRequest, db: Session = Depends(get_db)) -> Short
 
     try:
         short_url = create_short_url(
-            db, str(payload.target_url), expires_in_days=payload.expires_in_days
+            db,
+            str(payload.target_url),
+            expires_in_days=payload.expires_in_days,
+            custom_alias=payload.custom_alias,
         )
     except InvalidTargetUrl as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AliasAlreadyTaken as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except CodeGenerationExhausted as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
