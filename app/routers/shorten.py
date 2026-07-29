@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.rate_limit import enforce_shorten_rate_limit
 from app.schemas import ShortenRequest, ShortenResponse
 from app.services.shortener import (
     AliasAlreadyTaken,
@@ -14,7 +15,12 @@ from app.services.shortener import (
 router = APIRouter(tags=["shorten"])
 
 
-@router.post("/api/shorten", response_model=ShortenResponse, status_code=201)
+@router.post(
+    "/api/shorten",
+    response_model=ShortenResponse,
+    status_code=201,
+    dependencies=[Depends(enforce_shorten_rate_limit)],
+)
 def shorten_url(payload: ShortenRequest, db: Session = Depends(get_db)) -> ShortenResponse:
     settings = get_settings()
 

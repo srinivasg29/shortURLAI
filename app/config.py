@@ -13,6 +13,13 @@ class Settings(BaseSettings):
 
     redis_url: str | None = None
 
+    # 0 disables the check entirely. Defaults are deliberately asymmetric:
+    # creating a link is a write with lasting effect (worth limiting
+    # tightly against abuse/enumeration), following one is a read most
+    # legitimate traffic depends on.
+    rate_limit_shorten_per_minute: int = 20
+    rate_limit_redirect_per_minute: int = 120
+
     anthropic_api_key: str | None = None
     llm_model: str = "claude-sonnet-5"
 

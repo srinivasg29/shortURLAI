@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.cache import get_cache
 from app.database import SessionLocal, get_db
+from app.rate_limit import enforce_redirect_rate_limit
 from app.services.shortener import get_by_code, is_expired, record_click
 
 router = APIRouter(tags=["redirect"])
@@ -17,7 +18,7 @@ def _record_click_by_code(code: str) -> None:
         db.close()
 
 
-@router.get("/{code}")
+@router.get("/{code}", dependencies=[Depends(enforce_redirect_rate_limit)])
 def redirect_to_target(
     code: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)
 ) -> RedirectResponse:
