@@ -2,8 +2,10 @@ import json
 
 import orchestrator.agents.architecture as architecture_module
 import orchestrator.agents.coding as coding_module
+import orchestrator.agents.documentation as documentation_module
 import orchestrator.agents.planning as planning_module
 import orchestrator.agents.requirement as requirement_module
+import orchestrator.agents.testing as testing_module
 from app.config import get_settings
 from orchestrator.graph import resume_run, start_run
 
@@ -13,6 +15,8 @@ def _force_mock(monkeypatch) -> None:
     monkeypatch.setattr(planning_module, "is_live", lambda: False)
     monkeypatch.setattr(architecture_module, "is_live", lambda: False)
     monkeypatch.setattr(coding_module, "is_live", lambda: False)
+    monkeypatch.setattr(testing_module, "is_live", lambda: False)
+    monkeypatch.setattr(documentation_module, "is_live", lambda: False)
 
 
 def _use_audit_log(tmp_path, monkeypatch) -> None:
@@ -33,7 +37,13 @@ def test_start_run_auto_approve_completes_end_to_end(tmp_path, monkeypatch):
     assert result["normalized_spec"] == "Add a POST /api/shorten endpoint."
     assert result["llm_mode"] == "mock"
 
-    assert [g["gate_id"] for g in result["gate_log"]] == ["gate_0", "gate_1", "gate_2", "gate_3"]
+    assert [g["gate_id"] for g in result["gate_log"]] == [
+        "gate_0",
+        "gate_1",
+        "gate_2",
+        "gate_3",
+        "gate_4",
+    ]
     assert all(g["passed"] for g in result["gate_log"])
     assert result["gate_log"][2]["approver"] == "system:auto_approve"
 
@@ -47,6 +57,19 @@ def test_start_run_auto_approve_completes_end_to_end(tmp_path, monkeypatch):
     [diff] = result["code_diffs"]
     assert diff["applied"] is False
     assert diff["path"] == "app/routers/shorten.py"
+
+    # Both parallel branches (Testing, Documentation) contributed to state -
+    # proof the operator.add reducers merged both branches' writes rather
+    # than one clobbering the other.
+    [test_result] = result["test_results"]
+    assert test_result["executed"] is False
+    [doc_diff] = result["doc_diffs"]
+    assert doc_diff["applied"] is False
+
+    gate_4 = result["gate_log"][4]
+    assert gate_4["node"] == "gate4_sync"
+    assert "tests: passed" in gate_4["detail"]
+    assert "docs: complete" in gate_4["detail"]
 
     get_settings.cache_clear()
 
@@ -81,7 +104,13 @@ def test_resume_run_with_approval_completes_gate_2(tmp_path, monkeypatch):
     )
 
     assert "__interrupt__" not in final
-    assert [g["gate_id"] for g in final["gate_log"]] == ["gate_0", "gate_1", "gate_2", "gate_3"]
+    assert [g["gate_id"] for g in final["gate_log"]] == [
+        "gate_0",
+        "gate_1",
+        "gate_2",
+        "gate_3",
+        "gate_4",
+    ]
     gate_2 = final["gate_log"][2]
     assert gate_2["passed"] is True
     assert gate_2["approver"] == "human:reviewer"
@@ -107,8 +136,15 @@ def test_resume_run_with_rejection_fails_gate_2(tmp_path, monkeypatch):
     assert final["architecture_decisions"][0]["approved_by"] == "rejected_by:human:reviewer"
     # Gate 2 rejection doesn't yet halt the graph - conditional routing back
     # to Planning on rejection is wired in Phase 11 (re-planning). For now
-    # the graph runs straight through to Coding regardless.
-    assert [g["gate_id"] for g in final["gate_log"]] == ["gate_0", "gate_1", "gate_2", "gate_3"]
+    # the graph runs straight through to Coding, Testing, and Documentation
+    # regardless.
+    assert [g["gate_id"] for g in final["gate_log"]] == [
+        "gate_0",
+        "gate_1",
+        "gate_2",
+        "gate_3",
+        "gate_4",
+    ]
 
     get_settings.cache_clear()
 
@@ -146,7 +182,38 @@ def test_start_run_writes_audit_log(tmp_path, monkeypatch):
     assert any(e["type"] == "gate" and e["gate_id"] == "gate_1" for e in events)
     assert any(e["type"] == "gate" and e["gate_id"] == "gate_2" for e in events)
     assert any(e["type"] == "gate" and e["gate_id"] == "gate_3" for e in events)
+    assert any(e["type"] == "gate" and e["gate_id"] == "gate_4" for e in events)
     assert any(e["type"] == "code_diff" for e in events)
+    assert any(e["type"] == "test_result" for e in events)
+    assert any(e["type"] == "doc_diff" for e in events)
+
+    get_settings.cache_clear()
+
+
+def test_gate4_fails_when_testing_branch_fails_even_if_docs_complete(tmp_path, monkeypatch):
+    _force_mock(monkeypatch)
+    monkeypatch.setenv("AUTO_APPROVE", "1")
+    _use_audit_log(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        testing_module,
+        "run",
+        lambda state: {
+            "test_results": [
+                {"name": "forced_failure", "passed": False, "detail": "boom", "executed": True}
+            ]
+        },
+    )
+
+    result = start_run("Add a POST /api/shorten endpoint.", scenario="greenfield")
+
+    gate_4 = result["gate_log"][-1]
+    assert gate_4["gate_id"] == "gate_4"
+    assert gate_4["passed"] is False
+    assert "tests: failed/missing" in gate_4["detail"]
+    assert "docs: complete" in gate_4["detail"]
+    # Documentation branch still ran independently of Testing's failure.
+    assert result["doc_diffs"]
 
     get_settings.cache_clear()
 
