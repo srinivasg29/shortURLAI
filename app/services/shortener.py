@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -109,8 +110,27 @@ def is_expired(short_url: ShortUrl) -> bool:
     return expires_at < datetime.now(UTC)
 
 
-def record_click(db: Session, short_url: ShortUrl) -> None:
-    short_url.click_count += 1
-    short_url.last_clicked_at = datetime.now(UTC)
-    db.add(short_url)
+def record_click(db: Session, code: str) -> None:
+    """Increments click_count via a single atomic UPDATE ... SET
+    click_count = click_count + 1, rather than reading the row, mutating
+    an in-memory ORM object, and writing it back.
+
+    That read-modify-write pattern is the classic lost-update race: each
+    background click-recording task (app/routers/redirect.py) opens its
+    own DB session, so two concurrent redirects for the same code can both
+    read click_count=N before either commits, and both write back N+1 -
+    one increment silently vanishes. Pushing the `+ 1` into the UPDATE
+    statement itself makes the database responsible for the read-modify-
+    write atomicity instead of the application, which is what actually
+    closes the race under concurrent redirects.
+
+    Takes `code` rather than a loaded ShortUrl - the caller no longer
+    needs to fetch the row first at all, which also removes a query from
+    the hot path.
+    """
+    db.execute(
+        update(ShortUrl)
+        .where(ShortUrl.code == code)
+        .values(click_count=ShortUrl.click_count + 1, last_clicked_at=datetime.now(UTC))
+    )
     db.commit()

@@ -1,5 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
+from app.database import SessionLocal
 from app.services.shortener import (
     AliasAlreadyTaken,
     CodeGenerationExhausted,
@@ -43,10 +46,54 @@ def test_get_by_code_missing_returns_none(db_session):
 
 def test_record_click_increments_counter(db_session):
     short_url = create_short_url(db_session, "https://example.com/d")
-    record_click(db_session, short_url)
-    record_click(db_session, short_url)
+    record_click(db_session, short_url.code)
+    record_click(db_session, short_url.code)
+
+    db_session.refresh(short_url)
     assert short_url.click_count == 2
     assert short_url.last_clicked_at is not None
+
+
+def test_record_click_on_unknown_code_is_a_safe_no_op(db_session):
+    # No matching row -> the UPDATE affects zero rows; this must not raise.
+    record_click(db_session, "does-not-exist")
+
+
+def test_record_click_has_no_lost_updates_under_concurrent_redirects(db_session):
+    """Regression test for the brownfield scenario (Section 4 of the plan):
+    the original record_click() read click_count, incremented it in
+    Python, and wrote it back - each background click-recording task
+    (app/routers/redirect.py) opens its own DB session, so two concurrent
+    redirects for the same code could both read click_count=N and both
+    write back N+1, silently losing an increment.
+
+    Drives many concurrent record_click() calls from separate threads,
+    each with its own session (matching the real background-task pattern
+    exactly), and asserts the final count is exact - proof the atomic
+    UPDATE ... SET click_count = click_count + 1 closes the race that a
+    read-modify-write would not survive at this concurrency level.
+    """
+    short_url = create_short_url(db_session, "https://example.com/concurrent")
+    code = short_url.code
+
+    workers = 20
+    clicks_per_worker = 10
+
+    def _click_many() -> None:
+        db = SessionLocal()
+        try:
+            for _ in range(clicks_per_worker):
+                record_click(db, code)
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_click_many) for _ in range(workers)]
+        for f in futures:
+            f.result()
+
+    db_session.refresh(short_url)
+    assert short_url.click_count == workers * clicks_per_worker
 
 
 def test_create_short_url_exhausts_after_max_attempts(db_session, monkeypatch):
