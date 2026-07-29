@@ -1,10 +1,13 @@
 from datetime import datetime
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
+
+MAX_TARGET_URL_LENGTH = 2048
 
 
 class ShortenRequest(BaseModel):
-    target_url: HttpUrl
+    target_url: HttpUrl = Field(max_length=MAX_TARGET_URL_LENGTH)
+    expires_in_days: int | None = Field(default=None, gt=0)
 
 
 class ShortenResponse(BaseModel):
