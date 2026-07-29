@@ -28,7 +28,19 @@ cp .env.example .env
 
 ## Running the Service
 
-_Filled in during Phase 2._
+```bash
+uvicorn app.main:app --reload
+```
+
+- `POST /api/shorten` — create a short URL (`{"target_url": "https://..."}`).
+- `GET /{code}` — 302 redirect to the target URL; records a click asynchronously.
+- `GET /api/urls/{code}/stats` — click count and metadata for a short code.
+- `GET /health` — liveness check.
+- `GET /metrics` — Prometheus metrics.
+- `GET /docs` — interactive OpenAPI docs (`/openapi.json` for the raw schema).
+
+By default the service uses a local SQLite file (`data/shortener.db`) and an in-process TTL
+cache for the redirect hot path. Set `REDIS_URL` in `.env` to use Redis instead.
 
 ## Running the Agentic Orchestrator
 
