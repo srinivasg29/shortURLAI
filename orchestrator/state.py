@@ -33,6 +33,7 @@ class CodeDiff(TypedDict):
     path: str
     diff: str
     summary: str
+    applied: bool
 
 
 class TestResult(TypedDict):

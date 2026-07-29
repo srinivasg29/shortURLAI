@@ -1,6 +1,7 @@
 import json
 
 import orchestrator.agents.architecture as architecture_module
+import orchestrator.agents.coding as coding_module
 import orchestrator.agents.planning as planning_module
 import orchestrator.agents.requirement as requirement_module
 from app.config import get_settings
@@ -11,6 +12,7 @@ def _force_mock(monkeypatch) -> None:
     monkeypatch.setattr(requirement_module, "is_live", lambda: False)
     monkeypatch.setattr(planning_module, "is_live", lambda: False)
     monkeypatch.setattr(architecture_module, "is_live", lambda: False)
+    monkeypatch.setattr(coding_module, "is_live", lambda: False)
 
 
 def _use_audit_log(tmp_path, monkeypatch) -> None:
@@ -31,7 +33,7 @@ def test_start_run_auto_approve_completes_end_to_end(tmp_path, monkeypatch):
     assert result["normalized_spec"] == "Add a POST /api/shorten endpoint."
     assert result["llm_mode"] == "mock"
 
-    assert [g["gate_id"] for g in result["gate_log"]] == ["gate_0", "gate_1", "gate_2"]
+    assert [g["gate_id"] for g in result["gate_log"]] == ["gate_0", "gate_1", "gate_2", "gate_3"]
     assert all(g["passed"] for g in result["gate_log"])
     assert result["gate_log"][2]["approver"] == "system:auto_approve"
 
@@ -40,6 +42,11 @@ def test_start_run_auto_approve_completes_end_to_end(tmp_path, monkeypatch):
 
     [decision] = {d["approved_by"] for d in result["architecture_decisions"]}
     assert decision == "system:auto_approve"
+
+    # Mock mode never touches the real filesystem: proposal-only diff.
+    [diff] = result["code_diffs"]
+    assert diff["applied"] is False
+    assert diff["path"] == "app/routers/shorten.py"
 
     get_settings.cache_clear()
 
@@ -74,11 +81,12 @@ def test_resume_run_with_approval_completes_gate_2(tmp_path, monkeypatch):
     )
 
     assert "__interrupt__" not in final
-    assert [g["gate_id"] for g in final["gate_log"]] == ["gate_0", "gate_1", "gate_2"]
+    assert [g["gate_id"] for g in final["gate_log"]] == ["gate_0", "gate_1", "gate_2", "gate_3"]
     gate_2 = final["gate_log"][2]
     assert gate_2["passed"] is True
     assert gate_2["approver"] == "human:reviewer"
     assert all(d["approved_by"] == "human:reviewer" for d in final["architecture_decisions"])
+    assert final["code_diffs"]
 
     get_settings.cache_clear()
 
@@ -97,6 +105,10 @@ def test_resume_run_with_rejection_fails_gate_2(tmp_path, monkeypatch):
     gate_2 = final["gate_log"][2]
     assert gate_2["passed"] is False
     assert final["architecture_decisions"][0]["approved_by"] == "rejected_by:human:reviewer"
+    # Gate 2 rejection doesn't yet halt the graph - conditional routing back
+    # to Planning on rejection is wired in Phase 11 (re-planning). For now
+    # the graph runs straight through to Coding regardless.
+    assert [g["gate_id"] for g in final["gate_log"]] == ["gate_0", "gate_1", "gate_2", "gate_3"]
 
     get_settings.cache_clear()
 
@@ -133,6 +145,8 @@ def test_start_run_writes_audit_log(tmp_path, monkeypatch):
     assert any(e["type"] == "gate" and e["gate_id"] == "gate_0" for e in events)
     assert any(e["type"] == "gate" and e["gate_id"] == "gate_1" for e in events)
     assert any(e["type"] == "gate" and e["gate_id"] == "gate_2" for e in events)
+    assert any(e["type"] == "gate" and e["gate_id"] == "gate_3" for e in events)
+    assert any(e["type"] == "code_diff" for e in events)
 
     get_settings.cache_clear()
 
