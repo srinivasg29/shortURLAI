@@ -10,7 +10,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command
 
 from orchestrator import audit
-from orchestrator.agents import architecture, planning, requirement
+from orchestrator.agents import architecture, coding, planning, requirement
 from orchestrator.state import OrchestratorState
 
 
@@ -35,6 +35,15 @@ def _architecture_node(state: OrchestratorState) -> OrchestratorState:
     return result
 
 
+def _coding_node(state: OrchestratorState) -> OrchestratorState:
+    result = coding.run(state)
+    for entry in result.get("gate_log", []):
+        audit.append_event({"type": "gate", **entry})
+    for diff in result.get("code_diffs", []):
+        audit.append_event({"type": "code_diff", **diff})
+    return result
+
+
 @lru_cache
 def build_graph():
     """Compiled once and cached: the checkpointer backing Gate 2's
@@ -44,10 +53,12 @@ def build_graph():
     graph.add_node("requirement", _requirement_node)
     graph.add_node("planning", _planning_node)
     graph.add_node("architecture", _architecture_node)
+    graph.add_node("coding", _coding_node)
     graph.set_entry_point("requirement")
     graph.add_edge("requirement", "planning")
     graph.add_edge("planning", "architecture")
-    graph.add_edge("architecture", END)
+    graph.add_edge("architecture", "coding")
+    graph.add_edge("coding", END)
     return graph.compile(checkpointer=InMemorySaver())
 
 

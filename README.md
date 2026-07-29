@@ -60,7 +60,7 @@ the validation/expiration/error paths.
 The orchestrator is a [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph` over a
 single typed `OrchestratorState` (`orchestrator/state.py`) threaded through every node; list-valued
 fields (`gate_log`, `architecture_decisions`, etc.) use an `operator.add` reducer so nodes append
-to the decision lineage instead of overwriting it. So far the graph runs three nodes in sequence:
+to the decision lineage instead of overwriting it. So far the graph runs four nodes in sequence:
 
 - **Requirement Agent** (`orchestrator/agents/requirement.py`) — interprets a raw requirement,
   flags ambiguity, and normalizes it into an engineering-ready spec. Evaluates **Gate 0**
@@ -74,6 +74,22 @@ to the decision lineage instead of overwriting it. So far the graph runs three n
   decisions (data model, API contract, storage implications) for the change. Evaluates **Gate 2**
   (`HUMAN APPROVAL: design`) — the first human checkpoint, since this is where the data model/API
   contract locks in and gets expensive to change later.
+- **Coding Agent** (`orchestrator/agents/coding.py`) — picks a target source file via
+  `orchestrator/codebase_map.py` (a keyword → file heuristic that doubles as the brownfield
+  "Codebase Reasoning" capability), then either applies a real edit or produces an unapplied
+  proposal. Evaluates **Gate 3** (build + static checks pass) automatically.
+
+  This is the one agent that can touch the real filesystem, so it's deliberately conservative:
+  - **Live** (`ANTHROPIC_API_KEY` set): sends the current file content + requirement + approved
+    architecture decisions to the model, which returns the complete new file content. The result
+    is only written to disk if it parses as valid Python (`ast.parse`) and actually differs from
+    the original; otherwise it falls back to the mock path below. After writing, Gate 3 runs a
+    real `ruff check` against the file and fails the gate (without reverting — rollback lands in
+    Phase 11) if it doesn't pass.
+  - **Mock** (no API key, or the live attempt didn't produce an applicable change): produces a
+    `code_diffs` entry with `applied: False` and an empty diff — a labeled proposal, not a
+    filesystem change. **The repository is never mutated in mock mode**, which is what every
+    automated test in this repo runs under.
 
 ### Human approval gates (Gate 2, 5, 6)
 
@@ -108,5 +124,5 @@ the model — `state["llm_mode"]` records which path ran (`"live"` or `"mock"`) 
 mock-mode runs are visible in the audit trail rather than silently masquerading as real ones. A
 node only ever downgrades this flag to `"mock"`, never upgrades it, so the flag reflects the
 worst case across the whole run.
-Coding, Testing, Documentation, Review, and Release Readiness agents land in later phases and
-extend this same graph.
+Testing, Documentation, Review, and Release Readiness agents land in later phases and extend
+this same graph.
